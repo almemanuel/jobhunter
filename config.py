@@ -55,6 +55,7 @@ GEMINI_BASE_BACKOFF_SECONDS: float = 2.0
 # Domínios agregadores/paywall evitados como link principal (usados só como último fallback)
 BLACKLISTED_APPLY_DOMAINS: list[str] = [
     "talent.com",
+    "jobleads",
     "jobhunter",
     "jooble.org",
     "adzuna.com",
