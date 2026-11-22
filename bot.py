@@ -684,15 +684,20 @@ def extract_json_from_text(text: str) -> dict[str, Any] | None:
 
 
 def _normalize_evaluation(raw: dict[str, Any], na_whitelist: bool) -> dict[str, Any]:
-    """Garante tipos corretos e presença de todas as chaves do contrato JSON."""
+    """Garante tipos corretos, consistência match/score e presença de todas as chaves do contrato JSON."""
+    is_match = bool(raw.get("match", False))
     score_raw = raw.get("score", 0)
     try:
         score = max(0, min(10, int(score_raw)))
     except (TypeError, ValueError):
         score = 0
 
+    # Garante consistência: vaga descartada nunca pode exibir score >= 7
+    if not is_match and score >= config.MIN_MATCH_SCORE:
+        score = config.MIN_MATCH_SCORE - 1
+
     return {
-        "match": bool(raw.get("match", False)),
+        "match": is_match,
         "score": score,
         "na_whitelist": bool(raw.get("na_whitelist", na_whitelist)),
         "categoria": str(raw.get("categoria") or "Descartada").strip(),

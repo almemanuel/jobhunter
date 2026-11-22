@@ -296,6 +296,14 @@ BUSINESS_RULES: str = """
 3. **Cenário C — Exterior (Remoto Internacional):**
    - Inglês não pode ser bloqueador: aceitar vagas com inglês técnico/leitura, comunicação assíncrona ou em português. Descartar imediatamente se exigir fluência/avançado, calls diárias síncronas em inglês ou autorização de trabalho/residência fora do Brasil.
    - Faixa salarial estimada/compatível: >= US$ 2.500/mês (aceita estimativa baseada em nível/stack/país quando omitido).
+
+### Régua Rigorosa de Pontuação (`score` de 0 a 10 — SEJA CRÍTICO E REALISTA)
+- **0 a 3 (`match: false`):** Violou critério eliminatório (PJ no Brasil, presencial/híbrido fora de Ponta Grossa, inglês avançado/fluente obrigatório, cultura tóxica ou empresa desconhecida sem reputação).
+- **4 a 6 (`match: false`):** Sem violação grave, mas com gaps relevantes de senioridade, stack distante do perfil ou salário/regime incerto.
+- **7 (`match: true`):** Boa vaga — atende às regras e à maioria da stack, mas possui 1 a 2 gaps técnicos ou pontos de atenção (ex: exige senioridade acima da média ou ferramenta secundária ainda em aprofundamento).
+- **8 (`match: true`):** Muito boa — stack, nível, cultura e momento de carreira bem alinhados.
+- **9 (`match: true`):** Excelente — encaixe raro em stack, cultura, flexibilidade e potencial de crescimento.
+- **10 (`match: true`):** Vaga dos sonhos (RESERVAR APENAS PARA CASOS RARÍSSIMOS com 100% de aderência exata, benefícios/cultura excepcionais e zero gaps). NÃO inflacione notas para 10!
 """.strip()
 
 # =============================================================================

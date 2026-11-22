@@ -146,6 +146,11 @@ class TestJsonExtractionAndTelegram(unittest.TestCase):
         parsed = bot.extract_json_from_text(text)
         self.assertEqual(parsed, {"match": True, "score": 8})
 
+    def test_normalize_evaluation_caps_score_when_rejected(self) -> None:
+        normalized = bot._normalize_evaluation({"match": False, "score": 10}, na_whitelist=False)
+        self.assertFalse(normalized["match"])
+        self.assertEqual(normalized["score"], 6)
+
     def test_format_telegram_message_escapes_markdown(self) -> None:
         job = {
             "job_title": "AI_Engineer *Senior*",
