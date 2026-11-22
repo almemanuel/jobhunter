@@ -108,6 +108,37 @@ class TestNormalizationAndDates(unittest.TestCase):
         unique = bot.deduplicate_batch(jobs)
         self.assertEqual([j["job_id"] for j in unique], ["1", "3"])
 
+    def test_select_best_apply_link_prefers_company_and_blacklists_talent(self) -> None:
+        raw = {
+            "job_id": "j1",
+            "job_title": "Analytics Engineer",
+            "employer_name": "Omie",
+            "job_apply_link": "https://br.talent.com/view?id=646793688390964837",
+            "apply_options": [
+                {"apply_link": "https://br.talent.com/view?id=646793688390964837", "is_direct": False},
+                {"apply_link": "https://www.linkedin.com/jobs/view/123", "is_direct": False},
+                {"apply_link": "https://omie.gupy.io/jobs/999", "is_direct": True},
+            ],
+        }
+        primary, fallback = bot.select_best_apply_link(raw)
+        self.assertEqual(primary, "https://omie.gupy.io/jobs/999")
+        self.assertEqual(fallback, "")
+
+    def test_select_best_apply_link_uses_company_search_when_only_blacklisted(self) -> None:
+        raw = {
+            "job_id": "j2",
+            "job_title": "AI Engineer",
+            "employer_name": "Indicium",
+            "job_apply_link": "https://br.talent.com/view?id=646793688390964837",
+            "apply_options": [
+                {"apply_link": "https://br.talent.com/view?id=646793688390964837", "is_direct": False},
+            ],
+        }
+        primary, fallback = bot.select_best_apply_link(raw)
+        self.assertIn("google.com/search?q=", primary)
+        self.assertIn("Indicium", primary)
+        self.assertEqual(fallback, "https://br.talent.com/view?id=646793688390964837")
+
 
 class TestJsonExtractionAndTelegram(unittest.TestCase):
     def test_extract_json_from_fenced_markdown(self) -> None:

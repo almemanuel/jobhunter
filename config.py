@@ -52,6 +52,38 @@ HTTP_TIMEOUT_SECONDS: int = 30
 GEMINI_MAX_RETRIES: int = 2
 GEMINI_BASE_BACKOFF_SECONDS: float = 2.0
 
+# Domínios agregadores/paywall evitados como link principal (usados só como último fallback)
+BLACKLISTED_APPLY_DOMAINS: list[str] = [
+    "talent.com",
+    "jobhunter",
+    "jooble.org",
+    "adzuna.com",
+    "neuvoo.com",
+    "bebee.com",
+    "whatjobs.com",
+    "jobrapido.com",
+]
+
+# Portais oficiais / ATS priorizados logo após o site direto da empresa
+PREFERRED_ATS_DOMAINS: list[str] = [
+    "gupy.io",
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "myworkdayjobs.com",
+    "workday.com",
+    "smartrecruiters.com",
+    "bamboohr.com",
+    "breezy.hr",
+    "inhire.app",
+    "solides.com.br",
+    "recruitee.com",
+    "workable.com",
+    "icims.com",
+    "taleo.net",
+    "linkedin.com",
+]
+
 # =============================================================================
 # Whitelists de Empresas-Alvo (Seção 5.1)
 # =============================================================================

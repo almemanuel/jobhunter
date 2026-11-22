@@ -14,6 +14,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 import requests
 from google import genai
@@ -120,17 +121,86 @@ def check_whitelist(employer_name: str) -> dict[str, Any]:
 # =============================================================================
 
 
+def _is_blacklisted_domain(url: str) -> bool:
+    """Verifica se a URL pertence a um domínio na blacklist (ex: talent.com / agregadores pagos)."""
+    if not url:
+        return True
+    low = url.lower()
+    host = (urlparse(low).netloc or low).lower()
+    return any(bad in host or bad in low for bad in config.BLACKLISTED_APPLY_DOMAINS)
+
+
+def _is_preferred_ats(url: str) -> bool:
+    """Verifica se a URL é de um ATS oficial ou LinkedIn."""
+    host = (urlparse(url.lower()).netloc or "").lower()
+    return any(ats in host for ats in config.PREFERRED_ATS_DOMAINS)
+
+
+def _matches_employer_domain(url: str, employer_name: str) -> bool:
+    """Verifica se o domínio da URL contém o nome normalizado da empresa."""
+    host = (urlparse(url.lower()).netloc or "").lower()
+    tokens = [t for t in _normalize_text(employer_name).split() if len(t) >= 3]
+    return any(tok in host for tok in tokens)
+
+
+def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
+    """Seleciona o melhor link de candidatura priorizando site direto da empresa > ATS > outros > fallback.
+
+    Retorna `(link_principal, link_fallback)`. `link_fallback` só é preenchido quando todos os links
+    retornados pela API estão na blacklist (ex: talent.com), caso em que o principal vira busca direta
+    no site da empresa e o link externo fica apenas como fallback.
+    """
+    employer_name = str(raw.get("employer_name") or "").strip()
+    job_title = str(raw.get("job_title") or "").strip()
+
+    candidates: list[tuple[str, bool]] = []
+    seen_urls: set[str] = set()
+
+    def _add(url: Any, is_direct: bool = False) -> None:
+        cleaned = str(url or "").strip()
+        if cleaned and cleaned not in seen_urls:
+            seen_urls.add(cleaned)
+            candidates.append((cleaned, bool(is_direct)))
+
+    # 1. Lista completa de opções retornada pela JSearch (apply_options)
+    for opt in raw.get("apply_options") or []:
+        if isinstance(opt, dict):
+            _add(opt.get("apply_link"), bool(opt.get("is_direct", False)))
+
+    # 2. Campos padrão
+    _add(raw.get("job_apply_link"), bool(raw.get("job_apply_is_direct", False)))
+    _add(raw.get("job_google_link"), False)
+
+    non_blacklisted = [(url, direct) for url, direct in candidates if not _is_blacklisted_domain(url)]
+
+    if non_blacklisted:
+        def _rank(item: tuple[str, bool]) -> int:
+            url, is_direct = item
+            if _matches_employer_domain(url, employer_name):
+                return 0
+            if is_direct:
+                return 1
+            if _is_preferred_ats(url):
+                return 2
+            return 3
+
+        non_blacklisted.sort(key=_rank)
+        return non_blacklisted[0][0], ""
+
+    # Todos os links vieram de domínios na blacklist (ex: talent.com) -> prioriza busca no site da empresa
+    fallback_url = candidates[0][0] if candidates else ""
+    search_q = quote_plus(f"{employer_name} {job_title} carreiras vaga".strip())
+    company_search_url = f"https://www.google.com/search?q={search_q}"
+    return company_search_url, fallback_url
+
+
 def normalize_jsearch_job(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Normaliza um registro retornado pela JSearch API para o contrato interno."""
     job_id = str(raw.get("job_id") or "").strip()
     if not job_id:
         return None
 
-    apply_link = (
-        raw.get("job_apply_link")
-        or raw.get("job_google_link")
-        or ""
-    )
+    apply_link, fallback_link = select_best_apply_link(raw)
 
     return {
         "job_id": job_id,
@@ -141,7 +211,8 @@ def normalize_jsearch_job(raw: dict[str, Any]) -> dict[str, Any] | None:
         "job_country": str(raw.get("job_country") or "").strip(),
         "job_is_remote": bool(raw.get("job_is_remote", False)),
         "job_description": str(raw.get("job_description") or "").strip(),
-        "job_apply_link": str(apply_link).strip(),
+        "job_apply_link": apply_link,
+        "job_fallback_link": fallback_link,
         "source": "jsearch",
     }
 
@@ -789,13 +860,22 @@ def format_telegram_message(job: dict[str, Any], evaluation: dict[str, Any]) -> 
     clima = escape_markdown(evaluation["clima_e_cultura"])
     motivo = escape_markdown(evaluation["motivo"])
     apply_link = job["job_apply_link"].replace(")", "%29")
+    fallback_link = str(job.get("job_fallback_link") or "").replace(")", "%29")
+
+    if fallback_link:
+        link_line = (
+            f"🔗 [Buscar no site da empresa]({apply_link}) · "
+            f"[Fallback]({fallback_link})"
+        )
+    else:
+        link_line = f"🔗 [Aplicar na vaga]({apply_link})"
 
     return (
         f"🎯 *{job_title}* — {employer_name}\n"
         f"📌 {categoria} · {regime} · *{score}/10*\n"
         f"🏢 {clima}\n"
         f"💡 {motivo}\n"
-        f"🔗 [Aplicar na vaga]({apply_link})"
+        f"{link_line}"
     )
 
 
