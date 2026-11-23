@@ -144,11 +144,11 @@ def _matches_employer_domain(url: str, employer_name: str) -> bool:
 
 
 def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
-    """Seleciona o melhor link de candidatura priorizando site direto da empresa > ATS > outros > fallback.
+    """Seleciona link oficial de candidatura (site da empresa > ATS oficial/LinkedIn).
 
-    Retorna `(link_principal, link_fallback)`. `link_fallback` só é preenchido quando todos os links
-    retornados pela API estão na blacklist (ex: talent.com), caso em que o principal vira busca direta
-    no site da empresa e o link externo fica apenas como fallback.
+    Links de sites não oficiais / agregadores NUNCA são usados como link principal:
+    quando a JSearch só retorna agregadores, o link principal vira uma busca direta
+    pelos portais oficiais da empresa e o link externo fica apenas como fallback.
     """
     employer_name = str(raw.get("employer_name") or "").strip()
     job_title = str(raw.get("job_title") or "").strip()
@@ -171,25 +171,33 @@ def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
     _add(raw.get("job_apply_link"), bool(raw.get("job_apply_is_direct", False)))
     _add(raw.get("job_google_link"), False)
 
-    non_blacklisted = [(url, direct) for url, direct in candidates if not _is_blacklisted_domain(url)]
+    # Filtra estritamente links oficiais (site da empresa, is_direct não-blacklisted ou ATS/LinkedIn)
+    official_candidates: list[tuple[int, str]] = []
+    fallback_candidates: list[str] = []
 
-    if non_blacklisted:
-        def _rank(item: tuple[str, bool]) -> int:
-            url, is_direct = item
-            if _matches_employer_domain(url, employer_name):
-                return 0
-            if is_direct:
-                return 1
-            if _is_preferred_ats(url):
-                return 2
-            return 3
+    for url, is_direct in candidates:
+        if _is_blacklisted_domain(url):
+            fallback_candidates.append(url)
+            continue
+        if _matches_employer_domain(url, employer_name):
+            official_candidates.append((0, url))
+        elif is_direct:
+            official_candidates.append((1, url))
+        elif _is_preferred_ats(url):
+            official_candidates.append((2, url))
+        else:
+            fallback_candidates.append(url)
 
-        non_blacklisted.sort(key=_rank)
-        return non_blacklisted[0][0], ""
+    if official_candidates:
+        official_candidates.sort(key=lambda item: item[0])
+        return official_candidates[0][1], ""
 
-    # Todos os links vieram de domínios na blacklist (ex: talent.com) -> prioriza busca no site da empresa
-    fallback_url = candidates[0][0] if candidates else ""
-    search_q = quote_plus(f"{employer_name} {job_title} carreiras vaga".strip())
+    # Nenhum link oficial encontrado -> gera busca direta nos portais oficiais da empresa + link externo só como fallback
+    fallback_url = fallback_candidates[0] if fallback_candidates else ""
+    search_q = quote_plus(
+        f'"{employer_name}" "{job_title}" '
+        "(site:gupy.io OR site:inhire.app OR site:greenhouse.io OR site:lever.co OR site:ashbyhq.com OR site:linkedin.com/jobs OR carreiras)"
+    )
     company_search_url = f"https://www.google.com/search?q={search_q}"
     return company_search_url, fallback_url
 
@@ -336,6 +344,150 @@ def fetch_gupy_jobs() -> list[dict[str, Any]]:
             logger.info("Gupy [%s]: %d vagas recentes da whitelist.", term, matched_count)
         except Exception as exc:
             logger.warning("Falha ao consultar Gupy (%s): %s", term, exc)
+
+    return collected
+
+
+def _strip_html(raw_html: str) -> str:
+    """Remove tags HTML de descrições retornadas por APIs de ATS."""
+    text = html.unescape(raw_html or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _ats_job_matches_filters(title: str, location: str) -> bool:
+    """Pré-filtro local rápido para vagas de ATS oficiais (título + Brasil/LATAM/Remoto)."""
+    norm_title = _normalize_text(title)
+    if not any(kw in norm_title for kw in config.OFFICIAL_ATS_TITLE_KEYWORDS):
+        return False
+
+    norm_loc = _normalize_text(location)
+    if not norm_loc:
+        return True
+    has_br_or_latam = any(k in norm_loc for k in ("brazil", "brasil", "latam", "latin america", "south america", "ponta grossa"))
+    if has_br_or_latam:
+        return True
+    if any(excl in norm_loc for excl in config.OFFICIAL_ATS_EXCLUDED_LOCATIONS):
+        return False
+    return any(kw in norm_loc for kw in config.OFFICIAL_ATS_LOCATION_KEYWORDS)
+
+
+def fetch_official_ats_jobs() -> list[dict[str, Any]]:
+    """Coleta vagas diretamente das APIs oficiais de ATS (Greenhouse, Lever e Ashby)."""
+    if not config.ENABLE_OFFICIAL_ATS:
+        return []
+
+    collected: list[dict[str, Any]] = []
+
+    # 1. Greenhouse
+    for slug, company_name in config.OFFICIAL_GREENHOUSE_BOARDS.items():
+        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+        try:
+            resp = requests.get(url, params={"content": "true"}, timeout=15)
+            if resp.status_code != 200:
+                continue
+            jobs_list = resp.json().get("jobs") or []
+            matched = 0
+            for item in jobs_list:
+                title = str(item.get("title") or "").strip()
+                loc = str((item.get("location") or {}).get("name") or "").strip()
+                if not _ats_job_matches_filters(title, loc):
+                    continue
+                is_remote = any(w in loc.lower() for w in ("remote", "remoto", "anywhere"))
+                collected.append(
+                    {
+                        "job_id": f"ats:gh:{slug}:{item.get('id')}",
+                        "job_title": title,
+                        "employer_name": company_name,
+                        "job_city": loc,
+                        "job_state": "",
+                        "job_country": "BR" if any(w in loc.lower() for w in ("brazil", "brasil")) else "",
+                        "job_is_remote": is_remote,
+                        "job_description": _strip_html(str(item.get("content") or "")),
+                        "job_apply_link": str(item.get("absolute_url") or "").strip(),
+                        "job_fallback_link": "",
+                        "source": f"greenhouse:{slug}",
+                    }
+                )
+                matched += 1
+            if matched:
+                logger.info("ATS Oficial [Greenhouse/%s]: %d vagas aderentes.", company_name, matched)
+        except Exception as exc:
+            logger.debug("Falha ao consultar Greenhouse/%s: %s", slug, exc)
+
+    # 2. Lever
+    for slug, company_name in config.OFFICIAL_LEVER_BOARDS.items():
+        url = f"https://api.lever.co/v0/postings/{slug}"
+        try:
+            resp = requests.get(url, params={"mode": "json"}, timeout=15)
+            if resp.status_code != 200:
+                continue
+            jobs_list = resp.json() if isinstance(resp.json(), list) else []
+            matched = 0
+            for item in jobs_list:
+                title = str(item.get("text") or "").strip()
+                cats = item.get("categories") or {}
+                loc = str(cats.get("location") or "").strip()
+                workplace = str(item.get("workplaceType") or "").lower()
+                if not _ats_job_matches_filters(title, loc):
+                    continue
+                is_remote = workplace == "remote" or any(w in loc.lower() for w in ("remote", "remoto"))
+                collected.append(
+                    {
+                        "job_id": f"ats:lever:{slug}:{item.get('id')}",
+                        "job_title": title,
+                        "employer_name": company_name,
+                        "job_city": loc,
+                        "job_state": "",
+                        "job_country": "BR" if any(w in loc.lower() for w in ("brazil", "brasil")) else "",
+                        "job_is_remote": is_remote,
+                        "job_description": str(item.get("descriptionPlain") or _strip_html(str(item.get("description") or ""))),
+                        "job_apply_link": str(item.get("hostedUrl") or item.get("applyUrl") or "").strip(),
+                        "job_fallback_link": "",
+                        "source": f"lever:{slug}",
+                    }
+                )
+                matched += 1
+            if matched:
+                logger.info("ATS Oficial [Lever/%s]: %d vagas aderentes.", company_name, matched)
+        except Exception as exc:
+            logger.debug("Falha ao consultar Lever/%s: %s", slug, exc)
+
+    # 3. Ashby
+    for slug, company_name in config.OFFICIAL_ASHBY_BOARDS.items():
+        url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                continue
+            jobs_list = resp.json().get("jobs") or []
+            matched = 0
+            for item in jobs_list:
+                title = str(item.get("title") or "").strip()
+                loc = str(item.get("location") or "").strip()
+                if not _ats_job_matches_filters(title, loc):
+                    continue
+                is_remote = bool(item.get("isRemote")) or any(w in loc.lower() for w in ("remote", "remoto"))
+                collected.append(
+                    {
+                        "job_id": f"ats:ashby:{slug}:{item.get('id')}",
+                        "job_title": title,
+                        "employer_name": company_name,
+                        "job_city": loc,
+                        "job_state": "",
+                        "job_country": "BR" if any(w in loc.lower() for w in ("brazil", "brasil")) else "",
+                        "job_is_remote": is_remote,
+                        "job_description": str(item.get("descriptionPlain") or _strip_html(str(item.get("descriptionHtml") or ""))),
+                        "job_apply_link": str(item.get("jobUrl") or item.get("applyUrl") or "").strip(),
+                        "job_fallback_link": "",
+                        "source": f"ashby:{slug}",
+                    }
+                )
+                matched += 1
+            if matched:
+                logger.info("ATS Oficial [Ashby/%s]: %d vagas aderentes.", company_name, matched)
+        except Exception as exc:
+            logger.debug("Falha ao consultar Ashby/%s: %s", slug, exc)
 
     return collected
 
@@ -939,8 +1091,19 @@ def run() -> None:
     seen_list, seen_set = load_seen_jobs(config.SEEN_JOBS_PATH)
     logger.info("Carregados %d IDs já processados de %s.", len(seen_list), config.SEEN_JOBS_PATH)
 
-    # 1. Coleta de vagas
+    # 1. Coleta de vagas (fontes oficiais de ATS primeiro, depois JSearch e Gupy)
+    ats_jobs = fetch_official_ats_jobs()
+    new_ats_jobs = [j for j in deduplicate_batch(ats_jobs) if j["job_id"] not in seen_set]
+    if len(new_ats_jobs) > config.MAX_NEW_ATS_JOBS_PER_RUN:
+        logger.info(
+            "Limitando vagas novas de ATS nesta execução para %d (de %d encontradas).",
+            config.MAX_NEW_ATS_JOBS_PER_RUN,
+            len(new_ats_jobs),
+        )
+        new_ats_jobs = new_ats_jobs[: config.MAX_NEW_ATS_JOBS_PER_RUN]
+
     raw_jobs: list[dict[str, Any]] = []
+    raw_jobs.extend(new_ats_jobs)
     raw_jobs.extend(fetch_jsearch_jobs(env["RAPIDAPI_KEY"]))
     raw_jobs.extend(fetch_gupy_jobs())
 

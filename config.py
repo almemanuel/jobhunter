@@ -47,6 +47,89 @@ JSEARCH_API_HOST: str = "jsearch.p.rapidapi.com"
 
 GUPY_API_URL: str = "https://portal.api.gupy.io/api/v1/jobs"
 ENABLE_GUPY: bool = os.getenv("ENABLE_GUPY", "false").lower() in ("1", "true", "yes")
+ENABLE_OFFICIAL_ATS: bool = os.getenv("ENABLE_OFFICIAL_ATS", "true").lower() in ("1", "true", "yes")
+MAX_NEW_ATS_JOBS_PER_RUN: int = int(os.getenv("MAX_NEW_ATS_JOBS_PER_RUN", "15"))
+
+# APIs oficiais de ATS (100% diretas das empresas, zero agregadores/paywalls)
+OFFICIAL_GREENHOUSE_BOARDS: dict[str, str] = {
+    "gympass": "Wellhub",
+    "quintoandar": "QuintoAndar",
+    "vtex": "VTEX",
+    "inter": "Inter",
+    "brex": "Brex",
+    "databricks": "Databricks",
+    "stripe": "Stripe",
+    "coinbase": "Coinbase",
+    "duolingo": "Duolingo",
+    "wise": "Wise",
+    "anthropic": "Anthropic",
+}
+
+OFFICIAL_LEVER_BOARDS: dict[str, str] = {
+    "spotify": "Spotify",
+    "binance": "Binance",
+    "ciandt": "CI&T",
+}
+
+OFFICIAL_ASHBY_BOARDS: dict[str, str] = {
+    "snowflake": "Snowflake",
+    "kraken": "Kraken",
+}
+
+OFFICIAL_ATS_TITLE_KEYWORDS: tuple[str, ...] = (
+    "ai engineer",
+    "llm",
+    "genai",
+    "generative ai",
+    "analytics engineer",
+    "data engineer",
+    "engenheiro de dados",
+    "engenharia de dados",
+    "data platform",
+    "machine learning",
+    "ml engineer",
+    "applied ai",
+    "tech lead",
+    "team lead",
+)
+
+OFFICIAL_ATS_LOCATION_KEYWORDS: tuple[str, ...] = (
+    "brazil",
+    "brasil",
+    "latam",
+    "latin america",
+    "south america",
+    "americas",
+    "remote",
+    "remoto",
+    "anywhere",
+    "global",
+    "ponta grossa",
+)
+
+OFFICIAL_ATS_EXCLUDED_LOCATIONS: tuple[str, ...] = (
+    "united states only",
+    "us only",
+    "usa only",
+    "u.s. only",
+    "uk only",
+    "emea only",
+    "apac only",
+    "san francisco",
+    "new york",
+    "seattle",
+    "london",
+    "dublin",
+    "berlin",
+    "amsterdam",
+    "singapore",
+    "tokyo",
+    "bengaluru",
+    "bangalore",
+    "india",
+    "canada",
+    "australia",
+)
 
 HTTP_TIMEOUT_SECONDS: int = 30
 GEMINI_MAX_RETRIES: int = 2

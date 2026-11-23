@@ -139,6 +139,26 @@ class TestNormalizationAndDates(unittest.TestCase):
         self.assertIn("Indicium", primary)
         self.assertEqual(fallback, "https://br.talent.com/view?id=646793688390964837")
 
+    def test_select_best_apply_link_demotes_unofficial_aggregator_to_fallback(self) -> None:
+        raw = {
+            "job_id": "j3",
+            "job_title": "Data Engineer",
+            "employer_name": "Boticário",
+            "job_apply_link": "https://www.simplyhired.com.br/job/xyz",
+            "apply_options": [
+                {"apply_link": "https://www.simplyhired.com.br/job/xyz", "is_direct": False},
+            ],
+        }
+        primary, fallback = bot.select_best_apply_link(raw)
+        self.assertIn("google.com/search?q=", primary)
+        self.assertEqual(fallback, "https://www.simplyhired.com.br/job/xyz")
+
+    def test_ats_job_matches_filters(self) -> None:
+        self.assertTrue(bot._ats_job_matches_filters("Senior Analytics Engineer", "Brazil - Remote"))
+        self.assertTrue(bot._ats_job_matches_filters("AI Engineer", "Remote - LATAM"))
+        self.assertFalse(bot._ats_job_matches_filters("Senior Analytics Engineer", "San Francisco, CA"))
+        self.assertFalse(bot._ats_job_matches_filters("Account Executive", "Brazil - Remote"))
+
 
 class TestJsonExtractionAndTelegram(unittest.TestCase):
     def test_extract_json_from_fenced_markdown(self) -> None:
