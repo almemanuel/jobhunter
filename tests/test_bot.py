@@ -135,8 +135,9 @@ class TestNormalizationAndDates(unittest.TestCase):
             ],
         }
         primary, fallback = bot.select_best_apply_link(raw)
-        self.assertEqual(primary, "https://indicium.tech/carreiras")
-        self.assertIn("linkedin.com/jobs/search/", fallback)
+        self.assertIn("linkedin.com/jobs/search/", primary)
+        self.assertIn("Indicium", primary)
+        self.assertEqual(fallback, "https://br.talent.com/view?id=646793688390964837")
 
     def test_select_best_apply_link_demotes_unofficial_aggregator_to_fallback(self) -> None:
         raw = {

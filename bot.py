@@ -143,30 +143,37 @@ def _matches_employer_domain(url: str, employer_name: str) -> bool:
     return any(tok in host for tok in tokens)
 
 
-def _find_official_career_page(employer_name: str) -> str:
-    """Retorna a URL oficial do portal de carreiras da empresa, se mapeada em config."""
-    norm_emp = _normalize_text(employer_name)
-    if not norm_emp:
-        return ""
-    for key, url in config.OFFICIAL_CAREER_PAGES.items():
-        norm_key = _normalize_text(key)
-        if norm_key and re.search(rf"(?<![a-z0-9]){re.escape(norm_key)}(?![a-z0-9])", norm_emp):
-            return url
-    return ""
-
-
 def _build_linkedin_search_url(employer_name: str, job_title: str) -> str:
-    """Gera URL direta de busca no LinkedIn Jobs (muito mais limpa que busca genérica no Google)."""
+    """Gera URL direta de busca no LinkedIn Jobs (universal, nunca dá 404 e escala para qualquer empresa)."""
     keywords = quote_plus(f"{job_title} {employer_name}".strip())
     return f"https://www.linkedin.com/jobs/search/?keywords={keywords}&location=Brazil"
+
+
+def _is_url_reachable(url: str) -> bool:
+    """Validação leve (HEAD/GET) para evitar enviar links quebrados (404/410) ao usuário."""
+    if not url or not url.startswith("http"):
+        return False
+    # LinkedIn bloqueia HEAD sem cookies com 999, mas URLs /jobs/ são válidas
+    if "linkedin.com" in url.lower():
+        return True
+    try:
+        resp = requests.head(
+            url,
+            allow_redirects=True,
+            timeout=6,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        )
+        return resp.status_code < 400 or resp.status_code in (403, 405, 429)
+    except Exception:
+        return False
 
 
 def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
     """Seleciona link oficial de candidatura (site da empresa > ATS oficial/LinkedIn).
 
     Links de sites não oficiais / agregadores NUNCA são usados como link principal:
-    quando a JSearch só retorna agregadores, usa o portal oficial de carreiras da empresa
-    (se conhecido) ou busca direta no LinkedIn Jobs, deixando o agregador só como fallback.
+    quando a JSearch só retorna agregadores, usa busca direta no LinkedIn Jobs
+    (universal e sem links hardcoded que quebram), deixando o agregador só como fallback.
     """
     employer_name = str(raw.get("employer_name") or "").strip()
     job_title = str(raw.get("job_title") or "").strip()
@@ -210,18 +217,14 @@ def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
         official_candidates.sort(key=lambda item: item[0])
         return official_candidates[0][1], ""
 
-    # Nenhum link oficial direto na JSearch -> portal oficial da empresa ou busca direta no LinkedIn Jobs
-    career_page = _find_official_career_page(employer_name)
+    # Nenhum link oficial direto na JSearch -> busca direta no LinkedIn Jobs (universal, zero 404)
     linkedin_url = _build_linkedin_search_url(employer_name, job_title)
-    if career_page:
-        return career_page, linkedin_url
-
     fallback_url = fallback_candidates[0] if fallback_candidates else ""
     return linkedin_url, fallback_url
 
 
 def resolve_official_job_url(job: dict[str, Any]) -> tuple[str, str]:
-    """Para vagas aprovadas sem link oficial direto, tenta encontrar a URL exata em ATS/LinkedIn."""
+    """Para vagas aprovadas sem link oficial direto, tenta encontrar e validar a URL exata em ATS/LinkedIn."""
     primary = str(job.get("job_apply_link") or "")
     fallback = str(job.get("job_fallback_link") or "")
     if not fallback:
@@ -231,14 +234,13 @@ def resolve_official_job_url(job: dict[str, Any]) -> tuple[str, str]:
     title = str(job.get("job_title") or "").strip()
     query = (
         f'"{employer}" "{title}" '
-        "(gupy.io OR inhire.app OR greenhouse.io OR lever.co OR ashbyhq.com OR linkedin.com/jobs/view)"
+        "(linkedin.com/jobs/view OR gupy.io OR inhire.app OR greenhouse.io OR lever.co OR ashbyhq.com)"
     )
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
     }
 
-    # Tenta DuckDuckGo HTML e Bing para achar a URL oficial exata da vaga
     search_sources = [
         ("ddg", "https://html.duckduckgo.com/html/", "post", {"q": query}),
         ("bing", "https://www.bing.com/search", "get", {"q": query}),
@@ -265,7 +267,7 @@ def resolve_official_job_url(job: dict[str, Any]) -> tuple[str, str]:
                     url = unquote(parsed_qs.get("uddg", [url])[0])
                 if not url.startswith("http") or _is_blacklisted_domain(url):
                     continue
-                if _is_preferred_ats(url) or _matches_employer_domain(url, employer):
+                if (_is_preferred_ats(url) or _matches_employer_domain(url, employer)) and _is_url_reachable(url):
                     logger.info("Link oficial resolvido (%s) para %s — %s: %s", source_name, title, employer, url)
                     return url, ""
         except Exception as exc:
@@ -562,6 +564,13 @@ def fetch_official_ats_jobs() -> list[dict[str, Any]]:
             logger.debug("Falha ao consultar Ashby/%s: %s", slug, exc)
 
     return collected
+
+
+def _job_signature(job: dict[str, Any]) -> str:
+    """Assinatura estável (empresa + título) para evitar reenvio quando a JSearch rotaciona o job_id."""
+    emp = _normalize_text(job.get("employer_name", ""))
+    title = _normalize_text(job.get("job_title", ""))
+    return f"sig:{emp}|{title}" if emp and title else ""
 
 
 def deduplicate_batch(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1182,8 +1191,13 @@ def run() -> None:
     jobs = deduplicate_batch(raw_jobs)
     logger.info("Total de vagas únicas coletadas nesta execução: %d.", len(jobs))
 
-    # 2. Deduplicação pré-LLM
-    new_jobs = [job for job in jobs if job["job_id"] not in seen_set]
+    # 2. Deduplicação pré-LLM (por job_id e por assinatura empresa+título)
+    new_jobs = [
+        job
+        for job in jobs
+        if job["job_id"] not in seen_set
+        and (_job_signature(job) not in seen_set)
+    ]
     logger.info("Vagas novas para triagem: %d (ignoradas: %d).", len(new_jobs), len(jobs) - len(new_jobs))
 
     if not new_jobs:
@@ -1233,6 +1247,10 @@ def run() -> None:
                 evaluated_count += 1
                 seen_list.append(job_id)
                 seen_set.add(job_id)
+                sig = _job_signature(job)
+                if sig and sig not in seen_set:
+                    seen_list.append(sig)
+                    seen_set.add(sig)
 
                 logger.info(
                     "Resultado [%s]: match=%s | score=%d | categoria=%s | motivo=%s",
