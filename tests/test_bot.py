@@ -135,22 +135,21 @@ class TestNormalizationAndDates(unittest.TestCase):
             ],
         }
         primary, fallback = bot.select_best_apply_link(raw)
-        self.assertIn("google.com/search?q=", primary)
-        self.assertIn("Indicium", primary)
-        self.assertEqual(fallback, "https://br.talent.com/view?id=646793688390964837")
+        self.assertEqual(primary, "https://indicium.tech/carreiras")
+        self.assertIn("linkedin.com/jobs/search/", fallback)
 
     def test_select_best_apply_link_demotes_unofficial_aggregator_to_fallback(self) -> None:
         raw = {
             "job_id": "j3",
             "job_title": "Data Engineer",
-            "employer_name": "Boticário",
+            "employer_name": "Empresa Desconhecida XYZ",
             "job_apply_link": "https://www.simplyhired.com.br/job/xyz",
             "apply_options": [
                 {"apply_link": "https://www.simplyhired.com.br/job/xyz", "is_direct": False},
             ],
         }
         primary, fallback = bot.select_best_apply_link(raw)
-        self.assertIn("google.com/search?q=", primary)
+        self.assertIn("linkedin.com/jobs/search/", primary)
         self.assertEqual(fallback, "https://www.simplyhired.com.br/job/xyz")
 
     def test_ats_job_matches_filters(self) -> None:

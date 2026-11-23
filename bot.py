@@ -143,12 +143,30 @@ def _matches_employer_domain(url: str, employer_name: str) -> bool:
     return any(tok in host for tok in tokens)
 
 
+def _find_official_career_page(employer_name: str) -> str:
+    """Retorna a URL oficial do portal de carreiras da empresa, se mapeada em config."""
+    norm_emp = _normalize_text(employer_name)
+    if not norm_emp:
+        return ""
+    for key, url in config.OFFICIAL_CAREER_PAGES.items():
+        norm_key = _normalize_text(key)
+        if norm_key and re.search(rf"(?<![a-z0-9]){re.escape(norm_key)}(?![a-z0-9])", norm_emp):
+            return url
+    return ""
+
+
+def _build_linkedin_search_url(employer_name: str, job_title: str) -> str:
+    """Gera URL direta de busca no LinkedIn Jobs (muito mais limpa que busca genérica no Google)."""
+    keywords = quote_plus(f"{job_title} {employer_name}".strip())
+    return f"https://www.linkedin.com/jobs/search/?keywords={keywords}&location=Brazil"
+
+
 def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
     """Seleciona link oficial de candidatura (site da empresa > ATS oficial/LinkedIn).
 
     Links de sites não oficiais / agregadores NUNCA são usados como link principal:
-    quando a JSearch só retorna agregadores, o link principal vira uma busca direta
-    pelos portais oficiais da empresa e o link externo fica apenas como fallback.
+    quando a JSearch só retorna agregadores, usa o portal oficial de carreiras da empresa
+    (se conhecido) ou busca direta no LinkedIn Jobs, deixando o agregador só como fallback.
     """
     employer_name = str(raw.get("employer_name") or "").strip()
     job_title = str(raw.get("job_title") or "").strip()
@@ -192,14 +210,68 @@ def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
         official_candidates.sort(key=lambda item: item[0])
         return official_candidates[0][1], ""
 
-    # Nenhum link oficial encontrado -> gera busca direta nos portais oficiais da empresa + link externo só como fallback
+    # Nenhum link oficial direto na JSearch -> portal oficial da empresa ou busca direta no LinkedIn Jobs
+    career_page = _find_official_career_page(employer_name)
+    linkedin_url = _build_linkedin_search_url(employer_name, job_title)
+    if career_page:
+        return career_page, linkedin_url
+
     fallback_url = fallback_candidates[0] if fallback_candidates else ""
-    search_q = quote_plus(
-        f'"{employer_name}" "{job_title}" '
-        "(site:gupy.io OR site:inhire.app OR site:greenhouse.io OR site:lever.co OR site:ashbyhq.com OR site:linkedin.com/jobs OR carreiras)"
+    return linkedin_url, fallback_url
+
+
+def resolve_official_job_url(job: dict[str, Any]) -> tuple[str, str]:
+    """Para vagas aprovadas sem link oficial direto, tenta encontrar a URL exata em ATS/LinkedIn."""
+    primary = str(job.get("job_apply_link") or "")
+    fallback = str(job.get("job_fallback_link") or "")
+    if not fallback:
+        return primary, ""
+
+    employer = str(job.get("employer_name") or "").strip()
+    title = str(job.get("job_title") or "").strip()
+    query = (
+        f'"{employer}" "{title}" '
+        "(gupy.io OR inhire.app OR greenhouse.io OR lever.co OR ashbyhq.com OR linkedin.com/jobs/view)"
     )
-    company_search_url = f"https://www.google.com/search?q={search_q}"
-    return company_search_url, fallback_url
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+    }
+
+    # Tenta DuckDuckGo HTML e Bing para achar a URL oficial exata da vaga
+    search_sources = [
+        ("ddg", "https://html.duckduckgo.com/html/", "post", {"q": query}),
+        ("bing", "https://www.bing.com/search", "get", {"q": query}),
+    ]
+    for source_name, endpoint, method, params in search_sources:
+        try:
+            resp = (
+                requests.post(endpoint, data=params, headers=headers, timeout=12)
+                if method == "post"
+                else requests.get(endpoint, params=params, headers=headers, timeout=12)
+            )
+            if resp.status_code != 200:
+                continue
+            pattern = (
+                r'class="result__a"[^>]*href="([^"]+)"'
+                if source_name == "ddg"
+                else r'<h2[^>]*><a[^>]*href="(https?://[^"]+)"'
+            )
+            hrefs = re.findall(pattern, resp.text)
+            for href in hrefs[:8]:
+                url = html.unescape(href)
+                if "uddg=" in url:
+                    parsed_qs = parse_qs(urlparse(url).query)
+                    url = unquote(parsed_qs.get("uddg", [url])[0])
+                if not url.startswith("http") or _is_blacklisted_domain(url):
+                    continue
+                if _is_preferred_ats(url) or _matches_employer_domain(url, employer):
+                    logger.info("Link oficial resolvido (%s) para %s — %s: %s", source_name, title, employer, url)
+                    return url, ""
+        except Exception as exc:
+            logger.debug("Falha ao resolver URL oficial (%s) para %s: %s", source_name, employer, exc)
+
+    return primary, fallback
 
 
 def normalize_jsearch_job(raw: dict[str, Any]) -> dict[str, Any] | None:
