@@ -22,6 +22,7 @@ from google.genai import types
 
 import config
 import cv_generator
+import storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -574,19 +575,42 @@ def _job_signature(job: dict[str, Any]) -> str:
 
 
 def deduplicate_batch(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove duplicatas dentro da mesma execução por job_id e por (título + empresa)."""
+    """Remove duplicatas dentro da mesma execução por job_id, URL, hash da descrição e empresa+título."""
     unique: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    seen_signatures: set[tuple[str, str]] = set()
+    seen_urls: set[str] = set()
+    seen_hashes: set[str] = set()
+    company_titles: dict[str, list[str]] = {}
+
     for job in jobs:
-        job_id = job["job_id"]
-        sig = (_normalize_text(job.get("job_title", "")), _normalize_text(job.get("employer_name", "")))
-        if job_id in seen_ids or (sig[0] and sig[1] and sig in seen_signatures):
+        job_id = str(job.get("job_id") or "").strip()
+        if job_id in seen_ids:
             continue
+
+        norm_url = storage.normalize_apply_url(str(job.get("job_apply_link") or ""))
+        if norm_url and norm_url in seen_urls:
+            continue
+
+        desc_hash = storage.description_fingerprint(str(job.get("job_description") or ""))
+        if desc_hash and desc_hash in seen_hashes:
+            continue
+
+        comp = storage.canonical_company(str(job.get("employer_name") or ""))
+        title = storage.canonical_title(str(job.get("job_title") or ""))
+        if comp and title and any(
+            storage.titles_are_similar(title, prev) for prev in company_titles.get(comp, ())
+        ):
+            continue
+
         seen_ids.add(job_id)
-        if sig[0] and sig[1]:
-            seen_signatures.add(sig)
+        if norm_url:
+            seen_urls.add(norm_url)
+        if desc_hash:
+            seen_hashes.add(desc_hash)
+        if comp and title:
+            company_titles.setdefault(comp, []).append(title)
         unique.append(job)
+
     return unique
 
 
@@ -1167,62 +1191,81 @@ def _get_required_env() -> dict[str, str]:
 
 
 def run() -> None:
-    """Executa o pipeline completo de coleta, deduplicação, triagem e notificação."""
+    """Executa o pipeline completo de coleta, deduplicação (4 camadas), triagem e notificação."""
     env = _get_required_env()
-    seen_list, seen_set = load_seen_jobs(config.SEEN_JOBS_PATH)
-    logger.info("Carregados %d IDs já processados de %s.", len(seen_list), config.SEEN_JOBS_PATH)
-
-    # 1. Coleta de vagas (fontes oficiais de ATS primeiro, depois JSearch e Gupy)
-    ats_jobs = fetch_official_ats_jobs()
-    new_ats_jobs = [j for j in deduplicate_batch(ats_jobs) if j["job_id"] not in seen_set]
-    if len(new_ats_jobs) > config.MAX_NEW_ATS_JOBS_PER_RUN:
-        logger.info(
-            "Limitando vagas novas de ATS nesta execução para %d (de %d encontradas).",
-            config.MAX_NEW_ATS_JOBS_PER_RUN,
-            len(new_ats_jobs),
-        )
-        new_ats_jobs = new_ats_jobs[: config.MAX_NEW_ATS_JOBS_PER_RUN]
-
-    raw_jobs: list[dict[str, Any]] = []
-    raw_jobs.extend(new_ats_jobs)
-    raw_jobs.extend(fetch_jsearch_jobs(env["RAPIDAPI_KEY"]))
-    raw_jobs.extend(fetch_gupy_jobs())
-
-    jobs = deduplicate_batch(raw_jobs)
-    logger.info("Total de vagas únicas coletadas nesta execução: %d.", len(jobs))
-
-    # 2. Deduplicação pré-LLM (por job_id e por assinatura empresa+título)
-    new_jobs = [
-        job
-        for job in jobs
-        if job["job_id"] not in seen_set
-        and (_job_signature(job) not in seen_set)
-    ]
-    logger.info("Vagas novas para triagem: %d (ignoradas: %d).", len(new_jobs), len(jobs) - len(new_jobs))
-
-    if not new_jobs:
-        logger.info("Nenhuma vaga nova encontrada. Encerrando.")
-        return
-
-    # Prioriza vagas da whitelist (Estágio A) antes de descoberta (Estágio B)
-    new_jobs.sort(key=lambda j: not check_whitelist(j["employer_name"])["in_whitelist"])
-
-    # api_version="v1beta" é obrigatório para Google Search Grounding no google-genai>=3.x
-    client = genai.Client(
-        api_key=env["GEMINI_API_KEY"],
-        http_options=types.HttpOptions(api_version="v1beta"),
+    store = storage.JobStorage(
+        database_url=os.getenv("DATABASE_URL", ""),
+        json_path=config.SEEN_JOBS_PATH,
+        max_json_items=config.MAX_SEEN_JOBS,
     )
-    candidate_models = get_candidate_models(env["GEMINI_API_KEY"])
-    exhausted_models: set[str] = set()
-    grounding_state: dict[str, bool] = {"disabled": False}
-    web_cache: dict[str, str] = {}
-    logger.info("Fila de prioridade de modelos Gemini: %s", candidate_models)
-
-    notified_count = 0
-    evaluated_count = 0
+    store.connect()
 
     try:
+        # 1. Coleta de vagas (fontes oficiais de ATS primeiro, depois JSearch e Gupy)
+        ats_jobs = fetch_official_ats_jobs()
+        new_ats_jobs = [
+            j for j in deduplicate_batch(ats_jobs) if not store.is_duplicate(j)[0]
+        ]
+        if len(new_ats_jobs) > config.MAX_NEW_ATS_JOBS_PER_RUN:
+            logger.info(
+                "Limitando vagas novas de ATS nesta execução para %d (de %d encontradas).",
+                config.MAX_NEW_ATS_JOBS_PER_RUN,
+                len(new_ats_jobs),
+            )
+            new_ats_jobs = new_ats_jobs[: config.MAX_NEW_ATS_JOBS_PER_RUN]
+
+        raw_jobs: list[dict[str, Any]] = []
+        raw_jobs.extend(new_ats_jobs)
+        raw_jobs.extend(fetch_jsearch_jobs(env["RAPIDAPI_KEY"]))
+        raw_jobs.extend(fetch_gupy_jobs())
+
+        jobs = deduplicate_batch(raw_jobs)
+        logger.info("Total de vagas únicas coletadas nesta execução: %d.", len(jobs))
+
+        # 2. Deduplicação pré-LLM em 4 camadas (job_id, URL, hash de descrição, empresa+título)
+        new_jobs: list[dict[str, Any]] = []
+        dup_reasons: dict[str, int] = {}
+        for job in jobs:
+            is_dup, reason = store.is_duplicate(job)
+            if is_dup:
+                dup_reasons[reason] = dup_reasons.get(reason, 0) + 1
+            else:
+                new_jobs.append(job)
+
+        logger.info(
+            "Vagas novas para triagem: %d (ignoradas: %d | motivos: %s).",
+            len(new_jobs),
+            len(jobs) - len(new_jobs),
+            dup_reasons or "nenhum",
+        )
+
+        if not new_jobs:
+            logger.info("Nenhuma vaga nova encontrada. Encerrando.")
+            return
+
+        # Prioriza vagas da whitelist (Estágio A) antes de descoberta (Estágio B)
+        new_jobs.sort(key=lambda j: not check_whitelist(j["employer_name"])["in_whitelist"])
+
+        # api_version="v1beta" é obrigatório para Google Search Grounding no google-genai>=3.x
+        client = genai.Client(
+            api_key=env["GEMINI_API_KEY"],
+            http_options=types.HttpOptions(api_version="v1beta"),
+        )
+        candidate_models = get_candidate_models(env["GEMINI_API_KEY"])
+        exhausted_models: set[str] = set()
+        grounding_state: dict[str, bool] = {"disabled": False}
+        web_cache: dict[str, str] = {}
+        logger.info("Fila de prioridade de modelos Gemini: %s", candidate_models)
+
+        notified_count = 0
+        evaluated_count = 0
+
         for job in new_jobs:
+            is_dup, reason = store.is_duplicate(job)
+            if is_dup:
+                logger.debug("Ignorando duplicata tardia (%s): %s — %s", reason, job["job_title"], job["employer_name"])
+                continue
+
             job_id = job["job_id"]
             whitelist_info = check_whitelist(job["employer_name"])
             stage_label = "Estágio A (Whitelist)" if whitelist_info["in_whitelist"] else "Estágio B (Busca Web)"
@@ -1245,12 +1288,7 @@ def run() -> None:
                     web_cache=web_cache,
                 )
                 evaluated_count += 1
-                seen_list.append(job_id)
-                seen_set.add(job_id)
-                sig = _job_signature(job)
-                if sig and sig not in seen_set:
-                    seen_list.append(sig)
-                    seen_set.add(sig)
+                was_notified = False
 
                 logger.info(
                     "Resultado [%s]: match=%s | score=%d | categoria=%s | motivo=%s",
@@ -1262,9 +1300,14 @@ def run() -> None:
                 )
 
                 if evaluation["match"] and evaluation["score"] >= config.MIN_MATCH_SCORE:
+                    if job.get("job_fallback_link"):
+                        resolved_primary, resolved_fallback = resolve_official_job_url(job)
+                        job["job_apply_link"] = resolved_primary
+                        job["job_fallback_link"] = resolved_fallback
                     message = format_telegram_message(job, evaluation)
                     send_telegram_message(env["TELEGRAM_TOKEN"], env["TELEGRAM_CHAT_ID"], message)
                     notified_count += 1
+                    was_notified = True
                     logger.info("Alerta enviado no Telegram para: %s — %s", job["job_title"], job["employer_name"])
 
                     if config.ENABLE_TAILORED_CV:
@@ -1292,6 +1335,8 @@ def run() -> None:
                                 job["employer_name"],
                                 cv_exc,
                             )
+
+                store.record_job(job, evaluation, model_used=used_model, notified=was_notified)
             except DailyQuotaExceededError:
                 logger.warning(
                     "Todos os modelos Gemini atingiram cota/indisponibilidade após %d avaliações. "
@@ -1307,14 +1352,14 @@ def run() -> None:
                     job["employer_name"],
                     exc,
                 )
-    finally:
-        save_seen_jobs(seen_list, config.SEEN_JOBS_PATH, config.MAX_SEEN_JOBS)
 
-    logger.info(
-        "Execução finalizada. Avaliadas: %d | Notificadas: %d.",
-        evaluated_count,
-        notified_count,
-    )
+        logger.info(
+            "Execução finalizada. Avaliadas: %d | Notificadas: %d.",
+            evaluated_count,
+            notified_count,
+        )
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

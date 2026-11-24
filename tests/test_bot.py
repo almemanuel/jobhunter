@@ -43,6 +43,7 @@ if "google.genai" not in sys.modules:
 import bot
 import config
 import cv_generator
+import storage
 
 
 class TestSeenJobsPersistence(unittest.TestCase):
@@ -367,6 +368,49 @@ class TestMasterProfileAndCvGenerator(unittest.TestCase):
             cv_generator.build_cv_filename({"employer_name": "Spotify", "job_title": "AI Engineer"}),
             "CV_Emanuel_Almeida_Spotify_AI_Engineer.pdf",
         )
+
+
+class TestFourLayerDeduplication(unittest.TestCase):
+    def test_canonical_company_and_title_normalize_aliases_and_codes(self) -> None:
+        self.assertEqual(storage.canonical_company("CI&T"), storage.canonical_company("Ciandt"))
+        self.assertEqual(storage.canonical_company("Stone Co."), storage.canonical_company("Stone"))
+        self.assertEqual(
+            storage.canonical_title("[Job - 32496] AI Engineer/Software Architect, Brazil"),
+            storage.canonical_title("AI Engineer Software Architect"),
+        )
+
+    def test_storage_4_layers_block_reposted_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = storage.JobStorage(database_url="", json_path=Path(tmp) / "seen.json")
+            store.connect()
+            long_desc = "Construcao de pipelines de dados escalaveis com Python, Databricks, dbt Core, SQL avancado e agentes de IA em ambiente 100% remoto CLT com autonomia tecnica."
+            job1 = {
+                "job_id": "id-1",
+                "employer_name": "CI&T",
+                "job_title": "[Job - 32496] AI Engineer Mid-level, Brazil",
+                "job_apply_link": "https://jobs.lever.co/ciandt/abc?utm_source=linkedin",
+                "job_description": long_desc,
+            }
+            store.record_job(job1, {"match": True, "score": 9}, model_used="gemini-3.5-flash-lite", notified=True)
+
+            # Layer 1: mesmo job_id
+            self.assertEqual(store.is_duplicate({"job_id": "id-1"}), (True, "job_id"))
+            # Layer 2: mesma URL sem utm
+            self.assertEqual(
+                store.is_duplicate({"job_id": "id-2", "job_apply_link": "https://jobs.lever.co/ciandt/abc"}),
+                (True, "url"),
+            )
+            # Layer 3: mesmo hash de descrição mesmo com empresa/título diferentes
+            self.assertEqual(
+                store.is_duplicate({"job_id": "id-3", "employer_name": "Outra", "job_title": "Outro", "job_description": long_desc}),
+                (True, "description_hash"),
+            )
+            # Layer 4: alias de empresa (Ciandt == CI&T) + título similar sem código
+            self.assertEqual(
+                store.is_duplicate({"job_id": "id-4", "employer_name": "Ciandt", "job_title": "AI Engineer Mid-level"}),
+                (True, "company_title"),
+            )
+            store.close()
 
 
 if __name__ == "__main__":
