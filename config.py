@@ -331,6 +331,36 @@ GUPY_SEARCH_TERMS: list[str] = [
 
 PROFILE_PATH: str = os.getenv("PROFILE_PATH", "profile.md")
 ENABLE_TAILORED_CV: bool = os.getenv("ENABLE_TAILORED_CV", "true").lower() in ("1", "true", "yes")
+AUTO_APPLY_ENABLED: bool = os.getenv("AUTO_APPLY_ENABLED", "true").lower() in ("1", "true", "yes")
+AUTO_APPLY_DRY_RUN: bool = os.getenv("AUTO_APPLY_DRY_RUN", "true").lower() in ("1", "true", "yes")
+
+# Respostas padrão do candidato (pré-populam `candidate_answers` no Neon sem sobrescrever edições manuais)
+DEFAULT_CANDIDATE_ANSWERS: dict[str, tuple[str, str, str]] = {
+    "full_name": ("Nome completo", "Emanuel de Almeida Souza", "personal"),
+    "first_name": ("Primeiro nome", "Emanuel", "personal"),
+    "last_name": ("Sobrenome", "de Almeida Souza", "personal"),
+    "email": ("E-mail", "emanuel.almeida1998@outlook.com", "personal"),
+    "phone": ("Telefone / WhatsApp", "+55 42 98423-1561", "personal"),
+    "city": ("Cidade", "Ponta Grossa", "location"),
+    "state": ("Estado", "Paraná", "location"),
+    "country": ("País", "Brasil", "location"),
+    "location": ("Localização", "Ponta Grossa, Paraná, Brasil", "location"),
+    "linkedin_url": ("LinkedIn", "https://www.linkedin.com/in/almeida-emanuel", "links"),
+    "github_url": ("GitHub", "https://github.com/almemanuel", "links"),
+    "portfolio_url": ("Portfólio / Website", "https://github.com/almemanuel", "links"),
+    "current_company": ("Empresa atual", "Faculdade UNIGUAÇU", "experience"),
+    "current_role": ("Cargo atual", "Analista de Dados / Analytics Engineer Pleno", "experience"),
+    "education_school": ("Universidade", "Universidade Tecnológica Federal do Paraná (UTFPR)", "education"),
+    "education_degree": ("Curso / Formação", "Bacharelado em Ciência da Computação", "education"),
+    "graduation_year": ("Ano de formatura", "2026", "education"),
+    "salary_clt_remote_brl": ("Pretensão salarial CLT Remoto (R$)", "5500", "compensation"),
+    "salary_clt_pg_brl": ("Pretensão salarial CLT Ponta Grossa (R$)", "6000", "compensation"),
+    "salary_intl_usd_monthly": ("Pretensão salarial Internacional (US$/mês)", "2500", "compensation"),
+    "notice_period": ("Disponibilidade de início / Aviso prévio", "30 dias", "availability"),
+    "work_authorization_br": ("Autorização para trabalhar no Brasil", "Sim", "legal"),
+    "needs_visa_sponsorship": ("Precisa de visto/sponsorship", "Não", "legal"),
+    "english_level": ("Nível de inglês", "Técnico / Leitura (Básico em conversação)", "languages"),
+}
 
 _FALLBACK_CANDIDATE_PROFILE: str = """
 ### Perfil Técnico e Histórico do Candidato

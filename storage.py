@@ -128,6 +128,9 @@ class JobStorage:
         self._seen_desc_hashes: set[str] = set()
         self._company_titles: dict[str, list[str]] = {}
         self._json_list: list[str] = []
+        self._answers_cache: dict[str, str] = {
+            k: v[1] for k, v in config.DEFAULT_CANDIDATE_ANSWERS.items()
+        }
 
     @property
     def using_postgres(self) -> bool:
@@ -156,11 +159,14 @@ class JobStorage:
             try:
                 self._conn = self._open_postgres_connection()
                 self._ensure_schema()
+                self._seed_default_candidate_answers()
+                self._load_candidate_answers()
                 self._load_from_postgres()
                 self._seed_from_json_if_empty()
                 logger.info(
-                    "Persistência Neon PostgreSQL ativa (%d vagas no histórico recente).",
+                    "Persistência Neon PostgreSQL ativa (%d vagas no histórico, %d respostas do candidato).",
                     len(self._seen_ids),
+                    len(self._answers_cache),
                 )
                 return
             except Exception as exc:
@@ -219,6 +225,31 @@ class JobStorage:
             "CREATE INDEX IF NOT EXISTS idx_jobs_normalized_url ON jobs (normalized_url) WHERE normalized_url <> ''",
             "CREATE INDEX IF NOT EXISTS idx_jobs_description_hash ON jobs (description_hash) WHERE description_hash <> ''",
             "CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs (created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS candidate_answers (
+                field_key TEXT PRIMARY KEY,
+                question_label TEXT NOT NULL DEFAULT '',
+                answer_value TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'custom',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS applications (
+                id BIGSERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                employer_name TEXT NOT NULL DEFAULT '',
+                job_title TEXT NOT NULL DEFAULT '',
+                apply_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                missing_fields TEXT NOT NULL DEFAULT '[]',
+                cv_filename TEXT NOT NULL DEFAULT '',
+                attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_applications_job_id ON applications (job_id)",
+            "CREATE INDEX IF NOT EXISTS idx_applications_status ON applications (status)",
         ]
         cur = self._conn.cursor()
         try:
@@ -409,3 +440,106 @@ class JobStorage:
                 sig = f"sig:{comp}|{title}"
                 if sig not in self._json_list:
                     self._json_list.append(sig)
+
+    # -------------------------------------------------------------------------
+    # Cofre de Respostas do Candidato (`candidate_answers`) & `applications`
+    # -------------------------------------------------------------------------
+
+    def _seed_default_candidate_answers(self) -> None:
+        """Pré-popula respostas padrão do candidato sem sobrescrever valores já editados."""
+        if self._conn is None:
+            return
+        cur = self._conn.cursor()
+        try:
+            for field_key, (label, value, category) in config.DEFAULT_CANDIDATE_ANSWERS.items():
+                cur.execute(
+                    """
+                    INSERT INTO candidate_answers (field_key, question_label, answer_value, category)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (field_key) DO NOTHING
+                    """,
+                    (field_key, label, value, category),
+                )
+        finally:
+            cur.close()
+
+    def _load_candidate_answers(self) -> None:
+        if self._conn is None:
+            return
+        cur = self._conn.cursor()
+        try:
+            cur.execute("SELECT field_key, answer_value FROM candidate_answers")
+            for field_key, answer_value in cur.fetchall():
+                if field_key and answer_value is not None:
+                    self._answers_cache[str(field_key)] = str(answer_value)
+        finally:
+            cur.close()
+
+    def get_candidate_answers(self) -> dict[str, str]:
+        """Retorna cópia do dicionário de respostas cadastradas do candidato."""
+        return dict(self._answers_cache)
+
+    def upsert_candidate_answer(
+        self,
+        field_key: str,
+        answer_value: str,
+        question_label: str = "",
+        category: str = "custom",
+    ) -> None:
+        """Cadastra ou atualiza um dado do candidato no banco e no cache em memória."""
+        clean_key = re.sub(r"[^a-z0-9_]+", "_", _norm(field_key)).strip("_")
+        if not clean_key:
+            return
+        clean_val = str(answer_value).strip()
+        self._answers_cache[clean_key] = clean_val
+        if self._conn is not None:
+            cur = self._conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO candidate_answers (field_key, question_label, answer_value, category, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (field_key) DO UPDATE SET
+                        answer_value = EXCLUDED.answer_value,
+                        question_label = COALESCE(NULLIF(EXCLUDED.question_label, ''), candidate_answers.question_label),
+                        updated_at = NOW()
+                    """,
+                    (clean_key, question_label or clean_key, clean_val, category),
+                )
+            finally:
+                cur.close()
+
+    def record_application(
+        self,
+        job: dict[str, Any],
+        status: str,
+        reason: str = "",
+        missing_fields: list[dict[str, str]] | None = None,
+        cv_filename: str = "",
+    ) -> None:
+        """Registra tentativa de candidatura na tabela `applications`."""
+        if self._conn is None:
+            return
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO applications (
+                    job_id, employer_name, job_title, apply_url,
+                    status, reason, missing_fields, cv_filename
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(job.get("job_id") or ""),
+                    str(job.get("employer_name") or ""),
+                    str(job.get("job_title") or ""),
+                    str(job.get("job_apply_link") or ""),
+                    status,
+                    reason,
+                    json.dumps(missing_fields or [], ensure_ascii=False),
+                    cv_filename,
+                ),
+            )
+        finally:
+            cur.close()

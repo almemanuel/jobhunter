@@ -24,7 +24,9 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install chromium
 
       - name: Run Job Hunter Bot
         env:
@@ -33,6 +35,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AUTO_APPLY_ENABLED: "true"
+          AUTO_APPLY_DRY_RUN: "true"
         run: python bot.py
 
       - name: Commit updated seen_jobs.json

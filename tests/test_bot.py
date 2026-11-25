@@ -40,6 +40,7 @@ if "google.genai" not in sys.modules:
         sys.modules["google.genai"] = genai_mod
         sys.modules["google.genai.types"] = genai_types_mod
 
+import auto_apply
 import bot
 import config
 import cv_generator
@@ -411,6 +412,35 @@ class TestFourLayerDeduplication(unittest.TestCase):
                 (True, "company_title"),
             )
             store.close()
+
+
+class TestAutoApplyAndCandidateAnswers(unittest.TestCase):
+    def test_detect_portal_classifies_ats_and_login_sites(self) -> None:
+        self.assertEqual(auto_apply.detect_portal("https://job-boards.greenhouse.io/gympass/jobs/123"), "greenhouse")
+        self.assertEqual(auto_apply.detect_portal("https://jobs.lever.co/ciandt/abc"), "lever")
+        self.assertEqual(auto_apply.detect_portal("https://jobs.ashbyhq.com/snowflake/xyz"), "ashby")
+        self.assertEqual(auto_apply.detect_portal("https://omie.gupy.io/jobs/999"), "requires_login")
+        self.assertEqual(auto_apply.detect_portal("https://www.linkedin.com/jobs/view/123"), "requires_login")
+
+    def test_match_answer_for_field_uses_defaults_and_custom_keys(self) -> None:
+        answers = {k: v[1] for k, v in config.DEFAULT_CANDIDATE_ANSWERS.items()}
+        answers["pretensao_beneficios"] = "VR + Plano de saúde"
+        self.assertEqual(auto_apply.match_answer_for_field("GitHub Profile *", answers), "https://github.com/almemanuel")
+        self.assertEqual(auto_apply.match_answer_for_field("Notice Period / Aviso prévio", answers), "30 dias")
+        self.assertEqual(auto_apply.match_answer_for_field("Pretensão salarial (R$)", answers), "5500")
+        self.assertEqual(auto_apply.match_answer_for_field("Salary expectation (USD)", answers), "2500")
+        self.assertEqual(auto_apply.match_answer_for_field("Pretensão benefícios", answers), "VR + Plano de saúde")
+
+    def test_try_auto_apply_exits_cleanly_on_login_portal(self) -> None:
+        res = auto_apply.try_auto_apply(
+            job={"job_apply_link": "https://omie.gupy.io/jobs/1"},
+            pdf_bytes=None,
+            pdf_name="",
+            candidate_answers={},
+            dry_run=True,
+        )
+        self.assertEqual(res.status, "requires_login")
+        self.assertIn("gupy.io", res.reason)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import requests
 from google import genai
 from google.genai import types
 
+import auto_apply
 import config
 import cv_generator
 import storage
@@ -1173,6 +1174,45 @@ def send_telegram_document(
     resp.raise_for_status()
 
 
+def sync_telegram_answers(token: str, chat_id: str, store: storage.JobStorage) -> int:
+    """Lê comandos `/set <chave> <valor>` enviados pelo usuário no Telegram e salva no banco."""
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    saved = 0
+    try:
+        resp = requests.get(url, params={"limit": 30, "timeout": 2}, timeout=10)
+        if resp.status_code != 200:
+            return 0
+        updates = resp.json().get("result") or []
+        max_update_id = 0
+        for upd in updates:
+            upd_id = int(upd.get("update_id") or 0)
+            max_update_id = max(max_update_id, upd_id)
+            msg = upd.get("message") or {}
+            if str((msg.get("chat") or {}).get("id") or "") != str(chat_id):
+                continue
+            text = str(msg.get("text") or "").strip()
+            match = re.match(r"^/set\s+([a-zA-Z0-9_]+)\s+(.+)$", text)
+            if not match:
+                continue
+            key, value = match.group(1), match.group(2).strip()
+            store.upsert_candidate_answer(key, value)
+            saved += 1
+            try:
+                send_telegram_message(
+                    token,
+                    chat_id,
+                    f"✅ Dado salvo no banco: `{escape_markdown(key)}` = {escape_markdown(value)}",
+                )
+            except Exception:
+                pass
+        # Marca updates como lidos no Telegram para não reprocessar na próxima execução
+        if max_update_id > 0:
+            requests.get(url, params={"offset": max_update_id + 1, "limit": 1}, timeout=5)
+    except Exception as exc:
+        logger.debug("Não foi possível sincronizar comandos /set do Telegram: %s", exc)
+    return saved
+
+
 # =============================================================================
 # Pipeline Principal
 # =============================================================================
@@ -1201,6 +1241,11 @@ def run() -> None:
     store.connect()
 
     try:
+        # 0. Sincroniza respostas novas enviadas pelo usuário via `/set <chave> <valor>` no Telegram
+        synced = sync_telegram_answers(env["TELEGRAM_TOKEN"], env["TELEGRAM_CHAT_ID"], store)
+        if synced:
+            logger.info("Sincronizados %d novos dados do candidato via Telegram /set.", synced)
+
         # 1. Coleta de vagas (fontes oficiais de ATS primeiro, depois JSearch e Gupy)
         ats_jobs = fetch_official_ats_jobs()
         new_ats_jobs = [
@@ -1304,12 +1349,10 @@ def run() -> None:
                         resolved_primary, resolved_fallback = resolve_official_job_url(job)
                         job["job_apply_link"] = resolved_primary
                         job["job_fallback_link"] = resolved_fallback
-                    message = format_telegram_message(job, evaluation)
-                    send_telegram_message(env["TELEGRAM_TOKEN"], env["TELEGRAM_CHAT_ID"], message)
-                    notified_count += 1
-                    was_notified = True
-                    logger.info("Alerta enviado no Telegram para: %s — %s", job["job_title"], job["employer_name"])
 
+                    # Gera o CV adaptado em PDF antes do auto-apply (para anexar no formulário e/ou no Telegram)
+                    pdf_bytes: bytes | None = None
+                    pdf_name: str = ""
                     if config.ENABLE_TAILORED_CV:
                         try:
                             pdf_bytes, pdf_name = cv_generator.generate_tailored_cv_pdf(
@@ -1320,21 +1363,71 @@ def run() -> None:
                                 extract_json_fn=extract_json_from_text,
                                 call_with_backoff_fn=_call_with_backoff,
                             )
-                            send_telegram_document(
-                                env["TELEGRAM_TOKEN"],
-                                env["TELEGRAM_CHAT_ID"],
-                                pdf_bytes,
-                                pdf_name,
-                                caption=f"📄 Currículo adaptado para {job['job_title']} — {job['employer_name']}",
-                            )
-                            logger.info("Currículo adaptado enviado no Telegram: %s", pdf_name)
                         except Exception as cv_exc:
                             logger.warning(
-                                "Falha ao gerar/enviar CV adaptado para %s — %s: %s",
+                                "Falha ao gerar CV adaptado para %s — %s: %s",
                                 job["job_title"],
                                 job["employer_name"],
                                 cv_exc,
                             )
+
+                    apply_res: auto_apply.ApplyResult | None = None
+                    if config.AUTO_APPLY_ENABLED:
+                        apply_res = auto_apply.try_auto_apply(
+                            job=job,
+                            pdf_bytes=pdf_bytes,
+                            pdf_name=pdf_name,
+                            candidate_answers=store.get_candidate_answers(),
+                            dry_run=config.AUTO_APPLY_DRY_RUN,
+                        )
+                        store.record_application(
+                            job=job,
+                            status=apply_res.status,
+                            reason=apply_res.reason,
+                            missing_fields=apply_res.missing_fields,
+                            cv_filename=pdf_name,
+                        )
+
+                    # Regra 1: candidatura enviada -> só confirmação curta no Telegram
+                    if apply_res and apply_res.status == "submitted":
+                        confirm_msg = (
+                            f"✅ *Candidatura enviada:* {escape_markdown(job['job_title'])} — "
+                            f"{escape_markdown(job['employer_name'])} (*{evaluation['score']}/10*)"
+                        )
+                        send_telegram_message(env["TELEGRAM_TOKEN"], env["TELEGRAM_CHAT_ID"], confirm_msg)
+                        notified_count += 1
+                        was_notified = True
+                        logger.info("Candidatura enviada automaticamente: %s — %s", job["job_title"], job["employer_name"])
+                    else:
+                        # Regra 2 & 3: não conseguiu enviar ou faltou dado -> alerta + motivo + pedido de /set + PDF
+                        message = format_telegram_message(job, evaluation)
+                        if apply_res:
+                            if apply_res.status == "pending_info" and apply_res.missing_fields:
+                                missing_lines = "\n".join(
+                                    f"  • {escape_markdown(f['label'])} → `/set {f['key']} <valor>`"
+                                    for f in apply_res.missing_fields
+                                )
+                                message += f"\n\n❓ *Faltam dados para envio automático:*\n{missing_lines}"
+                            elif apply_res.reason:
+                                message += f"\n⚠️ *Auto-apply:* {escape_markdown(apply_res.reason)}"
+
+                        send_telegram_message(env["TELEGRAM_TOKEN"], env["TELEGRAM_CHAT_ID"], message)
+                        notified_count += 1
+                        was_notified = True
+                        logger.info("Alerta enviado no Telegram para: %s — %s", job["job_title"], job["employer_name"])
+
+                        if pdf_bytes and pdf_name:
+                            try:
+                                send_telegram_document(
+                                    env["TELEGRAM_TOKEN"],
+                                    env["TELEGRAM_CHAT_ID"],
+                                    pdf_bytes,
+                                    pdf_name,
+                                    caption=f"📄 Currículo adaptado para {job['job_title']} — {job['employer_name']}",
+                                )
+                                logger.info("Currículo adaptado enviado no Telegram: %s", pdf_name)
+                            except Exception as doc_exc:
+                                logger.warning("Falha ao enviar PDF no Telegram: %s", doc_exc)
 
                 store.record_job(job, evaluation, model_used=used_model, notified=was_notified)
             except DailyQuotaExceededError:
