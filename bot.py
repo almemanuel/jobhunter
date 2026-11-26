@@ -225,8 +225,78 @@ def select_best_apply_link(raw: dict[str, Any]) -> tuple[str, str]:
     return linkedin_url, fallback_url
 
 
+def is_blacklisted_employer(employer_name: str) -> bool:
+    """Bloqueia agregadores, intermediárias genéricas e empresas 'fake' antes do LLM."""
+    norm_emp = _normalize_text(employer_name)
+    if not norm_emp or norm_emp in ("empresa nao informada", "unknown", "n/a"):
+        return True
+    for bad in config.BLACKLISTED_EMPLOYERS:
+        norm_bad = _normalize_text(bad)
+        if norm_bad and re.search(rf"(?<![a-z0-9]){re.escape(norm_bad)}(?![a-z0-9])", norm_emp):
+            return True
+    return False
+
+
+def _probe_direct_ats_url(employer_name: str, job_title: str) -> str:
+    """Tenta localizar a URL exata da vaga consultando diretamente Greenhouse, Lever, Ashby e InHire."""
+    slug = re.sub(r"[^a-z0-9]+", "", storage.canonical_company(employer_name))
+    target_title = storage.canonical_title(job_title)
+    if not slug or not target_title:
+        return ""
+
+    # 1. Greenhouse
+    try:
+        r = requests.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs", timeout=6)
+        if r.status_code == 200:
+            for item in r.json().get("jobs") or []:
+                if storage.titles_are_similar(target_title, storage.canonical_title(str(item.get("title") or "")), threshold=0.68):
+                    url = str(item.get("absolute_url") or "").strip()
+                    if url:
+                        return url
+    except Exception:
+        pass
+
+    # 2. Lever
+    try:
+        r = requests.get(f"https://api.lever.co/v0/postings/{slug}", params={"mode": "json"}, timeout=6)
+        if r.status_code == 200 and isinstance(r.json(), list):
+            for item in r.json():
+                if storage.titles_are_similar(target_title, storage.canonical_title(str(item.get("text") or "")), threshold=0.68):
+                    url = str(item.get("hostedUrl") or item.get("applyUrl") or "").strip()
+                    if url:
+                        return url
+    except Exception:
+        pass
+
+    # 3. Ashby
+    try:
+        r = requests.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}", timeout=6)
+        if r.status_code == 200:
+            for item in r.json().get("jobs") or []:
+                if storage.titles_are_similar(target_title, storage.canonical_title(str(item.get("title") or "")), threshold=0.68):
+                    url = str(item.get("jobUrl") or item.get("applyUrl") or "").strip()
+                    if url:
+                        return url
+    except Exception:
+        pass
+
+    # 4. InHire
+    try:
+        r = requests.get("https://api.inhire.app/job-posts/public/pages", headers={"X-Tenant": slug}, timeout=6)
+        if r.status_code == 200:
+            for item in r.json().get("jobsPage") or []:
+                if storage.titles_are_similar(target_title, storage.canonical_title(str(item.get("displayName") or "")), threshold=0.68):
+                    jid = str(item.get("jobId") or "").strip()
+                    if jid:
+                        return f"https://{slug}.inhire.app/vagas/{jid}"
+    except Exception:
+        pass
+
+    return ""
+
+
 def resolve_official_job_url(job: dict[str, Any]) -> tuple[str, str]:
-    """Para vagas aprovadas sem link oficial direto, tenta encontrar e validar a URL exata em ATS/LinkedIn."""
+    """Para vagas aprovadas sem link oficial direto, tenta ATS direto (GH/Lever/Ashby/InHire) e busca web."""
     primary = str(job.get("job_apply_link") or "")
     fallback = str(job.get("job_fallback_link") or "")
     if not fallback:
@@ -234,6 +304,14 @@ def resolve_official_job_url(job: dict[str, Any]) -> tuple[str, str]:
 
     employer = str(job.get("employer_name") or "").strip()
     title = str(job.get("job_title") or "").strip()
+
+    # 1. Tentativa direta nas APIs oficiais de ATS pelo slug da empresa (mais rápido e 100% preciso)
+    direct_ats_url = _probe_direct_ats_url(employer, title)
+    if direct_ats_url:
+        logger.info("Link oficial resolvido via API ATS direta para %s — %s: %s", title, employer, direct_ats_url)
+        return direct_ats_url, ""
+
+    # 2. Busca web (DuckDuckGo + Bing) com validação HTTP
     query = (
         f'"{employer}" "{title}" '
         "(linkedin.com/jobs/view OR gupy.io OR inhire.app OR greenhouse.io OR lever.co OR ashbyhq.com)"
@@ -564,6 +642,66 @@ def fetch_official_ats_jobs() -> list[dict[str, Any]]:
                 logger.info("ATS Oficial [Ashby/%s]: %d vagas aderentes.", company_name, matched)
         except Exception as exc:
             logger.debug("Falha ao consultar Ashby/%s: %s", slug, exc)
+
+    # 4. InHire
+    for slug, company_name in config.OFFICIAL_INHIRE_BOARDS.items():
+        try:
+            resp = requests.get(
+                "https://api.inhire.app/job-posts/public/pages",
+                headers={"X-Tenant": slug},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            jobs_list = resp.json().get("jobsPage") or []
+            matched = 0
+            for item in jobs_list:
+                if str(item.get("status") or "").lower() not in ("", "published"):
+                    continue
+                title = str(item.get("displayName") or "").strip()
+                loc = str(item.get("location") or "").strip()
+                workplace = str(item.get("workplaceType") or "").lower()
+                loc_for_filter = f"{loc} {workplace}".strip()
+                if not _ats_job_matches_filters(title, loc_for_filter):
+                    continue
+                jid = str(item.get("jobId") or "").strip()
+                if not jid:
+                    continue
+                description = ""
+                try:
+                    detail_resp = requests.get(
+                        f"https://api.inhire.app/job-posts/public/pages/{jid}",
+                        headers={"X-Tenant": slug},
+                        timeout=10,
+                    )
+                    if detail_resp.status_code == 200:
+                        detail = detail_resp.json()
+                        description = _strip_html(
+                            str(detail.get("description") or detail.get("jobDescription") or "")
+                        )
+                except Exception:
+                    pass
+                is_remote = workplace == "remote" or any(w in loc.lower() for w in ("remote", "remoto"))
+                collected.append(
+                    {
+                        "job_id": f"ats:inhire:{slug}:{jid}",
+                        "job_title": title,
+                        "employer_name": company_name,
+                        "job_city": loc,
+                        "job_state": "",
+                        "job_country": "BR",
+                        "job_is_remote": is_remote,
+                        "job_description": description or f"{title} - {company_name} ({loc} / {workplace})",
+                        "job_apply_link": f"https://{slug}.inhire.app/vagas/{jid}",
+                        "job_fallback_link": "",
+                        "source": f"inhire:{slug}",
+                    }
+                )
+                matched += 1
+            if matched:
+                logger.info("ATS Oficial [InHire/%s]: %d vagas aderentes.", company_name, matched)
+        except Exception as exc:
+            logger.debug("Falha ao consultar InHire/%s: %s", slug, exc)
 
     return collected
 
@@ -1267,10 +1405,14 @@ def run() -> None:
         jobs = deduplicate_batch(raw_jobs)
         logger.info("Total de vagas únicas coletadas nesta execução: %d.", len(jobs))
 
-        # 2. Deduplicação pré-LLM em 4 camadas (job_id, URL, hash de descrição, empresa+título)
+        # 2. Filtro anti-agregadoras fake + Deduplicação pré-LLM em 4 camadas
         new_jobs: list[dict[str, Any]] = []
         dup_reasons: dict[str, int] = {}
+        blocked_employers = 0
         for job in jobs:
+            if is_blacklisted_employer(job.get("employer_name", "")):
+                blocked_employers += 1
+                continue
             is_dup, reason = store.is_duplicate(job)
             if is_dup:
                 dup_reasons[reason] = dup_reasons.get(reason, 0) + 1
@@ -1278,10 +1420,11 @@ def run() -> None:
                 new_jobs.append(job)
 
         logger.info(
-            "Vagas novas para triagem: %d (ignoradas: %d | motivos: %s).",
+            "Vagas novas para triagem: %d (duplicadas: %d %s | agregadoras bloqueadas: %d).",
             len(new_jobs),
-            len(jobs) - len(new_jobs),
-            dup_reasons or "nenhum",
+            sum(dup_reasons.values()),
+            dup_reasons or "{}",
+            blocked_employers,
         )
 
         if not new_jobs:

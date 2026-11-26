@@ -63,6 +63,9 @@ OFFICIAL_GREENHOUSE_BOARDS: dict[str, str] = {
     "duolingo": "Duolingo",
     "wise": "Wise",
     "anthropic": "Anthropic",
+    "stone": "Stone",
+    "blip": "Blip",
+    "rdstation": "RD Station",
 }
 
 OFFICIAL_LEVER_BOARDS: dict[str, str] = {
@@ -74,7 +77,48 @@ OFFICIAL_LEVER_BOARDS: dict[str, str] = {
 OFFICIAL_ASHBY_BOARDS: dict[str, str] = {
     "snowflake": "Snowflake",
     "kraken": "Kraken",
+    "nomad": "Nomad",
 }
+
+OFFICIAL_INHIRE_BOARDS: dict[str, str] = {
+    "indicium": "Indicium",
+    "cora": "Cora",
+}
+
+# Empresas agregadoras / intermediárias genéricas / "vagas fake" bloqueadas ANTES do LLM
+BLACKLISTED_EMPLOYERS: tuple[str, ...] = (
+    "jobgether",
+    "bairesdev",
+    "turing",
+    "toptal",
+    "crossover",
+    "netvagas",
+    "abler",
+    "vagas.com",
+    "catho",
+    "infojobs",
+    "trabalha brasil",
+    "trabalhabrasil",
+    "bne",
+    "empregos.com",
+    "talent.com",
+    "jobleads",
+    "jooble",
+    "lensa",
+    "dice",
+    "indi staffing",
+    "rex.zone",
+    "anyone ai",
+    "fullstack",
+    "geekhunter",
+    "programathor",
+    "revelo",
+    "confidencial",
+    "confidential",
+    "gupy",
+    "indeed",
+    "glassdoor",
+)
 
 OFFICIAL_ATS_TITLE_KEYWORDS: tuple[str, ...] = (
     "ai engineer",
@@ -257,10 +301,13 @@ TARGET_COMPANIES_BR_REMOTE: list[str] = [
     "CI&T",
     "Omie",
     "TOTVS",
-    # Healthtech & Mídia
+    # Healthtech, Bem-estar, SaaS & Mídia
     "Alice",
     "Dasa",
     "Spotify",
+    "Blip",
+    "TotalPass",
+    "Stone",
 ]
 
 TARGET_COMPANIES_PG: list[str] = [

@@ -442,6 +442,15 @@ class TestAutoApplyAndCandidateAnswers(unittest.TestCase):
         self.assertEqual(res.status, "requires_login")
         self.assertIn("gupy.io", res.reason)
 
+    def test_blacklisted_employers_and_new_whitelist_companies(self) -> None:
+        self.assertTrue(bot.is_blacklisted_employer("Jobgether"))
+        self.assertTrue(bot.is_blacklisted_employer("BairesDev"))
+        self.assertTrue(bot.is_blacklisted_employer("Netvagas"))
+        self.assertFalse(bot.is_blacklisted_employer("Blip"))
+        self.assertTrue(bot.check_whitelist("Blip")["in_br_remote"])
+        self.assertTrue(bot.check_whitelist("TotalPass")["in_br_remote"])
+        self.assertTrue(bot.check_whitelist("Stone Co.")["in_br_remote"])
+
 
 if __name__ == "__main__":
     unittest.main()
