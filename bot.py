@@ -1429,6 +1429,15 @@ def run() -> None:
 
         if not new_jobs:
             logger.info("Nenhuma vaga nova encontrada. Encerrando.")
+            if config.SEND_DAILY_HEARTBEAT:
+                try:
+                    send_telegram_message(
+                        env["TELEGRAM_TOKEN"],
+                        env["TELEGRAM_CHAT_ID"],
+                        f"🤖 Varredura diária OK · {len(jobs)} coletadas · 0 novas · 0 matches hoje.",
+                    )
+                except Exception as hb_exc:
+                    logger.warning("Falha ao enviar heartbeat no Telegram: %s", hb_exc)
             return
 
         # Prioriza vagas da whitelist (Estágio A) antes de descoberta (Estágio B)
@@ -1594,6 +1603,15 @@ def run() -> None:
             evaluated_count,
             notified_count,
         )
+        if notified_count == 0 and config.SEND_DAILY_HEARTBEAT:
+            try:
+                send_telegram_message(
+                    env["TELEGRAM_TOKEN"],
+                    env["TELEGRAM_CHAT_ID"],
+                    f"🤖 Varredura diária OK · {len(jobs)} coletadas · {evaluated_count} novas avaliadas · 0 matches hoje.",
+                )
+            except Exception as hb_exc:
+                logger.warning("Falha ao enviar heartbeat no Telegram: %s", hb_exc)
     finally:
         store.close()
 

@@ -380,6 +380,7 @@ PROFILE_PATH: str = os.getenv("PROFILE_PATH", "profile.md")
 ENABLE_TAILORED_CV: bool = os.getenv("ENABLE_TAILORED_CV", "true").lower() in ("1", "true", "yes")
 AUTO_APPLY_ENABLED: bool = os.getenv("AUTO_APPLY_ENABLED", "true").lower() in ("1", "true", "yes")
 AUTO_APPLY_DRY_RUN: bool = os.getenv("AUTO_APPLY_DRY_RUN", "true").lower() in ("1", "true", "yes")
+SEND_DAILY_HEARTBEAT: bool = os.getenv("SEND_DAILY_HEARTBEAT", "true").lower() in ("1", "true", "yes")
 
 # Respostas padrão do candidato (pré-populam `candidate_answers` no Neon sem sobrescrever edições manuais)
 DEFAULT_CANDIDATE_ANSWERS: dict[str, tuple[str, str, str]] = {

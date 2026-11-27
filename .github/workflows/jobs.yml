@@ -2,8 +2,8 @@ name: Job Hunter Bot
 
 on:
   schedule:
-    # 19h00 BRT (UTC-3) — 1x ao dia
-    - cron: '0 22 * * *'
+    # 19h17 BRT (UTC-3) — minuto quebrado evita fila de hora cheia no GitHub Actions
+    - cron: '17 22 * * *'
   workflow_dispatch:
 
 permissions:
